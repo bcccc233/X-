@@ -1,9 +1,14 @@
 allprojects {
     repositories {
+        // 国内镜像
+        maven("https://maven.aliyun.com/repository/google")
+        maven("https://maven.aliyun.com/repository/central")
+        maven("https://storage.flutter-io.cn")
         google()
         mavenCentral()
     }
 }
+
 
 val newBuildDir: Directory =
     rootProject.layout.buildDirectory
