@@ -1,6 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
 
+class Event {
+  final String title;
+  final DateTime date;
+  final String description;
+
+  Event({required this.title, required this.date, this.description = ''});
+}
+
 class CalendarHomePage extends StatefulWidget {
   const CalendarHomePage({super.key, required this.title});
 
@@ -17,17 +25,77 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
 
   int _currentIndex = 0;
 
+  final Map<DateTime, List<Event>> _events = {};
+
+  List<Event> _getEventsForDay(DateTime day) {
+    return _events[DateTime(day.year, day.month, day.day)] ?? [];
+  }
+
+  void _addEvent() {
+    if (_selectedDay == null) return;
+    showDialog(
+      context: context,
+      builder: (context) {
+        String title = '';
+        String description = '';
+        return AlertDialog(
+          title: const Text('添加日程'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                decoration: const InputDecoration(labelText: '标题'),
+                onChanged: (val) => title = val,
+              ),
+              TextField(
+                decoration: const InputDecoration(labelText: '描述'),
+                onChanged: (val) => description = val,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+              },
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  final dayKey = DateTime(
+                      _selectedDay!.year, _selectedDay!.month, _selectedDay!.day);
+                  if (_events[dayKey] == null) {
+                    _events[dayKey] = [];
+                  }
+                  _events[dayKey]!.add(Event(
+                      title: title, date: _selectedDay!, description: description));
+                });
+                Navigator.pop(context);
+              },
+              child: const Text('添加'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.title), 
+        title: Text(widget.title),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add),
+            onPressed: _addEvent,
+          )
+        ],
       ),
-
       body: Column(
         children: [
-          // 日历主体（月 / 周 / 日）
           TableCalendar(
             firstDay: DateTime.utc(2010, 1, 1),
             lastDay: DateTime.utc(2035, 12, 31),
@@ -50,23 +118,39 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
             onPageChanged: (focusedDay) {
               _focusedDay = focusedDay;
             },
+            calendarStyle: const CalendarStyle(
+              todayDecoration: BoxDecoration(
+                color: Colors.blueAccent,
+                shape: BoxShape.circle,
+              ),
+              selectedDecoration: BoxDecoration(
+                color: Colors.orange,
+                shape: BoxShape.circle,
+              ),
+              todayTextStyle: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+              selectedTextStyle: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
-
           Expanded(
-  child: Center(
-    child: Text(
-      _selectedDay == null
-          ? '请选择一个日期'
-          : '你选择的是：${_selectedDay!.year}-${_selectedDay!.month}-${_selectedDay!.day}',
-      style: const TextStyle(fontSize: 16),
-    ),
-  ),
-),
-
+            child: _selectedDay == null
+                ? const Center(child: Text('请选择一个日期'))
+                : ListView(
+                    children: _getEventsForDay(_selectedDay!)
+                        .map((e) => ListTile(
+                              title: Text(e.title),
+                              subtitle: Text(e.description),
+                            ))
+                        .toList(),
+                  ),
+          ),
         ],
       ),
-
-      // 底部导航栏
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (index) {
