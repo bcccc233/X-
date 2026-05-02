@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:lunar/lunar.dart';
 import 'package:table_calendar/table_calendar.dart';
 import '../services/event_storage_service.dart';
 
@@ -156,6 +157,15 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
         .toList();
   }
 
+  String _getLunarDayLabel(DateTime date) {
+    final lunar = Lunar.fromDate(date);
+    final currentJieQi = lunar.getCurrentJieQi();
+    if (currentJieQi != null) {
+      return currentJieQi.getName();
+    }
+    return lunar.getDayInChinese();
+  }
+
   @override
   Widget build(BuildContext context) {
     Widget bodyContent;
@@ -185,6 +195,28 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                 _focusedDay = focusedDay;
               },
               calendarBuilders: CalendarBuilders(
+                defaultBuilder: (context, day, focusedDay) {
+                  final lunarLabel = _getLunarDayLabel(day);
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          '${day.day}',
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          lunarLabel,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Colors.grey[500],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
                 markerBuilder: (context, date, events) {
                   final hasEvents = _getEventsForDay(date).isNotEmpty;
                   if (hasEvents) {
