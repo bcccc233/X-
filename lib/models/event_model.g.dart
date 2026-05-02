@@ -19,35 +19,29 @@ class EventModelAdapter extends TypeAdapter<EventModel> {
     return EventModel(
       id: fields[0] as String,
       title: fields[1] as String,
-      startTime: fields[2] as DateTime,
-      endTime: fields[3] as DateTime,
-      description: fields[4] as String,
-      priority: fields[5] as int,
-      isFinished: fields[6] as bool,
-      lastModified: fields[7] as DateTime,
+      startDateTime: fields[2] as DateTime,
+      durationInMinutes: fields[3] as int,
+      createdAt: fields[4] as DateTime,
+      updatedAt: fields[5] as DateTime,
     );
   }
 
   @override
   void write(BinaryWriter writer, EventModel obj) {
     writer
-      ..writeByte(8)
+      ..writeByte(6)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
       ..write(obj.title)
       ..writeByte(2)
-      ..write(obj.startTime)
+      ..write(obj.startDateTime)
       ..writeByte(3)
-      ..write(obj.endTime)
+      ..write(obj.durationInMinutes)
       ..writeByte(4)
-      ..write(obj.description)
+      ..write(obj.createdAt)
       ..writeByte(5)
-      ..write(obj.priority)
-      ..writeByte(6)
-      ..write(obj.isFinished)
-      ..writeByte(7)
-      ..write(obj.lastModified);
+      ..write(obj.updatedAt);
   }
 
   @override

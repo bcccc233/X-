@@ -1,30 +1,54 @@
 import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
+import '../services/event_storage_service.dart';
 
 class Event {
+  final String? id; // 数据库ID
   final String title;
-  final TimeOfDay startTime;
+  final DateTime startDateTime;
   final Duration duration;
 
-  Event({required this.title, required this.startTime, required this.duration});
+  Event({
+    this.id,
+    required this.title,
+    required this.startDateTime,
+    required this.duration,
+  });
+
+  DateTime get endDateTime => startDateTime.add(duration);
 
   String get timeRange {
-    final end = DateTime(
-      2000,
-      1,
-      1,
-      startTime.hour,
-      startTime.minute,
-    ).add(duration);
-    final endTime = TimeOfDay(hour: end.hour, minute: end.minute);
-    return '${_formatTimeOfDay(startTime)} - ${_formatTimeOfDay(endTime)}';
+    final start = _formatDateTime(startDateTime);
+    final end = _formatDateTime(endDateTime);
+    return '$start - $end';
+  }
+
+  List<DateTime> get involvedDates {
+    List<DateTime> dates = [];
+    DateTime current = DateTime(
+      startDateTime.year,
+      startDateTime.month,
+      startDateTime.day,
+    );
+    DateTime end = DateTime(
+      endDateTime.year,
+      endDateTime.month,
+      endDateTime.day,
+    );
+    while (!current.isAfter(end)) {
+      dates.add(current);
+      current = current.add(const Duration(days: 1));
+    }
+    return dates;
   }
 }
 
-String _formatTimeOfDay(TimeOfDay time) {
-  final hour = time.hour.toString().padLeft(2, '0');
-  final minute = time.minute.toString().padLeft(2, '0');
-  return '$hour:$minute';
+String _formatDateTime(DateTime dt) {
+  final date =
+      '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+  final time =
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  return '$date $time';
 }
 
 class CalendarHomePage extends StatefulWidget {
@@ -43,17 +67,46 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
   int _currentIndex = 0;
 
   // 日程数据
-  Map<DateTime, List<Event>> _events = {};
+  List<Event> _events = [];
+
+  // 数据存储服务
+  late EventStorageService _storageService;
 
   // 设置
   bool _isDarkTheme = false;
   bool _notificationsEnabled = true;
   CalendarFormat _defaultCalendarFormat = CalendarFormat.month;
 
-  String _formatTimeOfDay(TimeOfDay time) {
-    final hour = time.hour.toString().padLeft(2, '0');
-    final minute = time.minute.toString().padLeft(2, '0');
-    return '$hour:$minute';
+  @override
+  void initState() {
+    super.initState();
+    _initializeStorage();
+  }
+
+  // 初始化存储服务并加载数据
+  Future<void> _initializeStorage() async {
+    _storageService = EventStorageService();
+    await _storageService.init();
+
+    // 从数据库加载事件
+    _loadEventsFromStorage();
+  }
+
+  // 从存储中加载事件
+  void _loadEventsFromStorage() {
+    final storedEvents = _storageService.getAllEvents();
+    setState(() {
+      _events = storedEvents
+          .map(
+            (model) => Event(
+              id: model.id,
+              title: model.title,
+              startDateTime: model.startDateTime,
+              duration: Duration(minutes: model.durationInMinutes),
+            ),
+          )
+          .toList();
+    });
   }
 
   DateTime _normalizeDate(DateTime date) =>
@@ -61,20 +114,19 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
 
   bool _eventEquals(Event a, Event b) =>
       a.title == b.title &&
-      a.startTime == b.startTime &&
+      a.startDateTime == b.startDateTime &&
       a.duration == b.duration;
 
   bool _eventsOverlap(Event a, Event b) {
-    final aStart = DateTime(2000, 1, 1, a.startTime.hour, a.startTime.minute);
+    final aStart = a.startDateTime;
     final aEnd = aStart.add(a.duration);
-    final bStart = DateTime(2000, 1, 1, b.startTime.hour, b.startTime.minute);
+    final bStart = b.startDateTime;
     final bEnd = bStart.add(b.duration);
     return aStart.isBefore(bEnd) && bStart.isBefore(aEnd);
   }
 
-  bool _hasConflict(DateTime day, Event newEvent, {Event? exclude}) {
-    final events = _events[_normalizeDate(day)] ?? [];
-    for (final event in events) {
+  bool _hasConflict(Event newEvent, {Event? exclude}) {
+    for (final event in _events) {
       if (exclude != null && _eventEquals(event, exclude)) continue;
       if (_eventsOverlap(event, newEvent)) return true;
     }
@@ -98,7 +150,10 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
   }
 
   List<Event> _getEventsForDay(DateTime day) {
-    return _events[_normalizeDate(day)] ?? [];
+    final normalizedDay = _normalizeDate(day);
+    return _events
+        .where((event) => event.involvedDates.contains(normalizedDay))
+        .toList();
   }
 
   @override
@@ -227,24 +282,36 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                           IconButton(
                             icon: const Icon(Icons.edit),
                             onPressed: () async {
-                              final localContext = context;
+                              if (!mounted) return;
+                              final dialogContext = context;
                               final newEvent = await _showEventDialog(
-                                localContext,
-                                day: day,
+                                dialogContext,
                                 initialEvent: event,
                               );
                               if (!mounted) return;
+                              final currentContext = context;
                               if (newEvent != null) {
-                                setState(() {
-                                  events[index] = newEvent;
-                                  _events[_normalizeDate(day)] = events;
-                                });
-                                if (_hasConflict(
-                                  day,
-                                  newEvent,
-                                  exclude: event,
-                                )) {
-                                  _showConflictReminder(this.context);
+                                if (_hasConflict(newEvent, exclude: event)) {
+                                  _showConflictReminder(currentContext);
+                                } else {
+                                  setState(() {
+                                    final globalIndex = _events.indexOf(event);
+                                    _events[globalIndex] = Event(
+                                      id: event.id,
+                                      title: newEvent.title,
+                                      startDateTime: newEvent.startDateTime,
+                                      duration: newEvent.duration,
+                                    );
+                                  });
+                                  // 更新数据库
+                                  if (event.id != null) {
+                                    await _storageService.updateEvent(
+                                      id: event.id!,
+                                      title: newEvent.title,
+                                      startDateTime: newEvent.startDateTime,
+                                      duration: newEvent.duration,
+                                    );
+                                  }
                                 }
                               }
                             },
@@ -253,13 +320,12 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                             icon: const Icon(Icons.delete),
                             onPressed: () {
                               setState(() {
-                                events.removeAt(index);
-                                if (events.isEmpty) {
-                                  _events.remove(_normalizeDate(day));
-                                } else {
-                                  _events[_normalizeDate(day)] = events;
-                                }
+                                _events.remove(event);
                               });
+                              // 从数据库删除
+                              if (event.id != null) {
+                                _storageService.deleteEvent(event.id!);
+                              }
                             },
                           ),
                         ],
@@ -272,16 +338,36 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
           padding: const EdgeInsets.all(8.0),
           child: ElevatedButton(
             onPressed: () async {
-              final localContext = context;
-              final newEvent = await _showEventDialog(localContext, day: day);
               if (!mounted) return;
+              final dialogContext = context;
+              final newEvent = await _showEventDialog(
+                dialogContext,
+                initialEvent: null,
+                day: day,
+              );
+              if (!mounted) return;
+              final currentContext = context;
               if (newEvent != null) {
-                setState(() {
-                  _events.putIfAbsent(_normalizeDate(day), () => []);
-                  _events[_normalizeDate(day)]!.add(newEvent);
-                });
-                if (_hasConflict(day, newEvent)) {
-                  _showConflictReminder(this.context);
+                if (_hasConflict(newEvent)) {
+                  _showConflictReminder(currentContext);
+                } else {
+                  // 保存到数据库并获取 ID
+                  final eventId = await _storageService.addEvent(
+                    title: newEvent.title,
+                    startDateTime: newEvent.startDateTime,
+                    duration: newEvent.duration,
+                  );
+                  setState(() {
+                    // 创建带 ID 的 Event 对象
+                    _events.add(
+                      Event(
+                        id: eventId,
+                        title: newEvent.title,
+                        startDateTime: newEvent.startDateTime,
+                        duration: newEvent.duration,
+                      ),
+                    );
+                  });
                 }
               }
             },
@@ -302,16 +388,32 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
             icon: const Icon(Icons.add),
             label: const Text('添加日程'),
             onPressed: () async {
-              final localContext = context;
-              final result = await _showAddEventWithDateDialog(localContext);
               if (!mounted) return;
+              final dialogContext = context;
+              final result = await _showAddEventWithDateDialog(dialogContext);
+              if (!mounted) return;
+              final currentContext = context;
               if (result != null) {
-                setState(() {
-                  _events.putIfAbsent(result.key, () => []);
-                  _events[result.key]!.add(result.value);
-                });
-                if (_hasConflict(result.key, result.value)) {
-                  _showConflictReminder(this.context);
+                if (_hasConflict(result)) {
+                  _showConflictReminder(currentContext);
+                } else {
+                  // 保存到数据库并获取 ID
+                  final eventId = await _storageService.addEvent(
+                    title: result.title,
+                    startDateTime: result.startDateTime,
+                    duration: result.duration,
+                  );
+                  setState(() {
+                    // 创建带 ID 的 Event 对象
+                    _events.add(
+                      Event(
+                        id: eventId,
+                        title: result.title,
+                        startDateTime: result.startDateTime,
+                        duration: result.duration,
+                      ),
+                    );
+                  });
                 }
               }
             },
@@ -320,60 +422,97 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
         Expanded(
           child: _events.isEmpty
               ? const Center(child: Text('暂无日程'))
-              : ListView(
-                  children: (_events.keys.toList()..sort()).map((day) {
-                    final dayEvents = _events[day]!;
-                    return ExpansionTile(
-                      title: Text(
-                        '${day.year}-${day.month}-${day.day} (${dayEvents.length})',
-                      ),
-                      children: List.generate(dayEvents.length, (index) {
-                        final event = dayEvents[index];
-                        return ListTile(
-                          title: Text(event.title),
-                          subtitle: Text(event.timeRange),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.edit),
-                                onPressed: () async {
-                                  final localContext = context;
-                                  final newEvent = await _showEventDialog(
-                                    localContext,
-                                    day: day,
-                                    initialEvent: event,
-                                  );
-                                  if (!mounted) return;
-                                  if (newEvent != null) {
-                                    setState(() {
-                                      dayEvents[index] = newEvent;
-                                    });
-                                    if (_hasConflict(
-                                      day,
-                                      newEvent,
-                                      exclude: event,
-                                    )) {
-                                      _showConflictReminder(this.context);
-                                    }
-                                  }
-                                },
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.delete),
-                                onPressed: () {
-                                  setState(() {
-                                    dayEvents.removeAt(index);
-                                    if (dayEvents.isEmpty) _events.remove(day);
-                                  });
-                                },
-                              ),
-                            ],
+              : Builder(
+                  builder: (context) {
+                    Map<DateTime, List<Event>> groupedEvents = {};
+                    for (var event in _events) {
+                      for (var date in event.involvedDates) {
+                        final normalized = _normalizeDate(date);
+                        groupedEvents
+                            .putIfAbsent(normalized, () => [])
+                            .add(event);
+                      }
+                    }
+                    final sortedDays = groupedEvents.keys.toList()..sort();
+                    return ListView(
+                      children: sortedDays.map((day) {
+                        final dayEvents = groupedEvents[day]!;
+                        return ExpansionTile(
+                          title: Text(
+                            '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')} (${dayEvents.length})',
                           ),
+                          children: List.generate(dayEvents.length, (index) {
+                            final event = dayEvents[index];
+                            return ListTile(
+                              title: Text(event.title),
+                              subtitle: Text(event.timeRange),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit),
+                                    onPressed: () async {
+                                      if (!mounted) return;
+                                      final dialogContext = context;
+                                      final newEvent = await _showEventDialog(
+                                        dialogContext,
+                                        initialEvent: event,
+                                      );
+                                      if (!mounted) return;
+                                      final currentContext = context;
+                                      if (newEvent != null) {
+                                        if (_hasConflict(
+                                          newEvent,
+                                          exclude: event,
+                                        )) {
+                                          _showConflictReminder(currentContext);
+                                        } else {
+                                          setState(() {
+                                            final globalIndex = _events.indexOf(
+                                              event,
+                                            );
+                                            _events[globalIndex] = Event(
+                                              id: event.id,
+                                              title: newEvent.title,
+                                              startDateTime:
+                                                  newEvent.startDateTime,
+                                              duration: newEvent.duration,
+                                            );
+                                          });
+                                          // 更新数据库
+                                          if (event.id != null) {
+                                            await _storageService.updateEvent(
+                                              id: event.id!,
+                                              title: newEvent.title,
+                                              startDateTime:
+                                                  newEvent.startDateTime,
+                                              duration: newEvent.duration,
+                                            );
+                                          }
+                                        }
+                                      }
+                                    },
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete),
+                                    onPressed: () {
+                                      setState(() {
+                                        _events.remove(event);
+                                      });
+                                      // 从数据库删除
+                                      if (event.id != null) {
+                                        _storageService.deleteEvent(event.id!);
+                                      }
+                                    },
+                                  ),
+                                ],
+                              ),
+                            );
+                          }),
                         );
-                      }),
+                      }).toList(),
                     );
-                  }).toList(),
+                  },
                 ),
         ),
       ],
@@ -443,6 +582,8 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                         setState(() {
                           _events.clear();
                         });
+                        // 清空数据库
+                        _storageService.clearAll();
                         Navigator.pop(context);
                       },
                       child: const Text('确定'),
@@ -460,22 +601,28 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
   Future<Event?> _showEventDialog(
     BuildContext context, {
     Event? initialEvent,
-    required DateTime day,
+    DateTime? day,
   }) {
     TextEditingController controller = TextEditingController(
       text: initialEvent?.title ?? '',
     );
-    TimeOfDay selectedTime =
-        initialEvent?.startTime ?? const TimeOfDay(hour: 9, minute: 0);
+    DateTime selectedDateTime =
+        initialEvent?.startDateTime ?? (day ?? DateTime.now());
     Duration selectedDuration =
         initialEvent?.duration ?? const Duration(hours: 1);
-    final List<Duration> durationOptions = const [
-      Duration(minutes: 15),
-      Duration(minutes: 30),
-      Duration(minutes: 45),
-      Duration(hours: 1),
-      Duration(hours: 2),
-      Duration(hours: 3),
+    final List<Duration> durationOptions = [
+      const Duration(minutes: 15),
+      const Duration(minutes: 30),
+      const Duration(minutes: 45),
+      const Duration(hours: 1),
+      const Duration(hours: 2),
+      const Duration(hours: 3),
+      const Duration(hours: 6),
+      const Duration(hours: 12),
+      const Duration(days: 1),
+      const Duration(days: 2),
+      const Duration(days: 3),
+      const Duration(days: 7),
     ];
 
     return showDialog<Event>(
@@ -496,21 +643,63 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                   const SizedBox(height: 12),
                   Row(
                     children: [
+                      const Text('开始日期：'),
+                      TextButton(
+                        onPressed: () async {
+                          final localContext = context;
+                          final pickedDate = await showDatePicker(
+                            context: localContext,
+                            initialDate: selectedDateTime,
+                            firstDate: DateTime(2010),
+                            lastDate: DateTime(2035),
+                          );
+                          if (!mounted) return;
+                          if (pickedDate != null) {
+                            setState(() {
+                              selectedDateTime = DateTime(
+                                pickedDate.year,
+                                pickedDate.month,
+                                pickedDate.day,
+                                selectedDateTime.hour,
+                                selectedDateTime.minute,
+                              );
+                            });
+                          }
+                        },
+                        child: Text(
+                          '${selectedDateTime.year}-${selectedDateTime.month.toString().padLeft(2, '0')}-${selectedDateTime.day.toString().padLeft(2, '0')}',
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
                       const Text('开始时间：'),
                       TextButton(
                         onPressed: () async {
                           final localContext = context;
-                          final picked = await showTimePicker(
+                          final pickedTime = await showTimePicker(
                             context: localContext,
-                            initialTime: selectedTime,
+                            initialTime: TimeOfDay.fromDateTime(
+                              selectedDateTime,
+                            ),
                           );
-                          if (picked != null) {
+                          if (!mounted) return;
+                          if (pickedTime != null) {
                             setState(() {
-                              selectedTime = picked;
+                              selectedDateTime = DateTime(
+                                selectedDateTime.year,
+                                selectedDateTime.month,
+                                selectedDateTime.day,
+                                pickedTime.hour,
+                                pickedTime.minute,
+                              );
                             });
                           }
                         },
-                        child: Text(_formatTimeOfDay(selectedTime)),
+                        child: Text(
+                          '${selectedDateTime.hour.toString().padLeft(2, '0')}:${selectedDateTime.minute.toString().padLeft(2, '0')}',
+                        ),
                       ),
                     ],
                   ),
@@ -520,10 +709,14 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                       DropdownButton<Duration>(
                         value: selectedDuration,
                         items: durationOptions.map((duration) {
-                          final minutes = duration.inMinutes;
-                          final label = minutes >= 60
-                              ? '${minutes ~/ 60}小时${minutes % 60 == 0 ? '' : '${minutes % 60}分'}'
-                              : '$minutes分钟';
+                          String label;
+                          if (duration.inDays > 0) {
+                            label = '${duration.inDays}天';
+                          } else if (duration.inHours > 0) {
+                            label = '${duration.inHours}小时';
+                          } else {
+                            label = '${duration.inMinutes}分钟';
+                          }
                           return DropdownMenuItem(
                             value: duration,
                             child: Text(label),
@@ -553,7 +746,7 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                         context,
                         Event(
                           title: controller.text.trim(),
-                          startTime: selectedTime,
+                          startDateTime: selectedDateTime,
                           duration: selectedDuration,
                         ),
                       );
@@ -570,23 +763,26 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
   }
 
   // 日程视图添加事件（选择日期 + 输入内容 + 时间 + 时长）
-  Future<MapEntry<DateTime, Event>?> _showAddEventWithDateDialog(
-    BuildContext context,
-  ) async {
-    DateTime selectedDate = _normalizeDate(DateTime.now());
+  Future<Event?> _showAddEventWithDateDialog(BuildContext context) async {
+    DateTime selectedDateTime = DateTime.now();
     TextEditingController controller = TextEditingController();
-    TimeOfDay selectedTime = const TimeOfDay(hour: 9, minute: 0);
     Duration selectedDuration = const Duration(hours: 1);
-    final List<Duration> durationOptions = const [
-      Duration(minutes: 15),
-      Duration(minutes: 30),
-      Duration(minutes: 45),
-      Duration(hours: 1),
-      Duration(hours: 2),
-      Duration(hours: 3),
+    final List<Duration> durationOptions = [
+      const Duration(minutes: 15),
+      const Duration(minutes: 30),
+      const Duration(minutes: 45),
+      const Duration(hours: 1),
+      const Duration(hours: 2),
+      const Duration(hours: 3),
+      const Duration(hours: 6),
+      const Duration(hours: 12),
+      const Duration(days: 1),
+      const Duration(days: 2),
+      const Duration(days: 3),
+      const Duration(days: 7),
     ];
 
-    return showDialog<MapEntry<DateTime, Event>>(
+    return showDialog<Event>(
       context: context,
       builder: (context) {
         return StatefulBuilder(
@@ -599,20 +795,26 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                   TextButton.icon(
                     icon: const Icon(Icons.calendar_today),
                     label: Text(
-                      '${selectedDate.year}-${selectedDate.month}-${selectedDate.day}',
+                      '${selectedDateTime.year}-${selectedDateTime.month.toString().padLeft(2, '0')}-${selectedDateTime.day.toString().padLeft(2, '0')}',
                     ),
                     onPressed: () async {
                       final localContext = context;
-                      final picked = await showDatePicker(
+                      final pickedDate = await showDatePicker(
                         context: localContext,
-                        initialDate: selectedDate,
+                        initialDate: selectedDateTime,
                         firstDate: DateTime(2010),
                         lastDate: DateTime(2035),
                       );
                       if (!mounted) return;
-                      if (picked != null) {
+                      if (pickedDate != null) {
                         setState(() {
-                          selectedDate = _normalizeDate(picked);
+                          selectedDateTime = DateTime(
+                            pickedDate.year,
+                            pickedDate.month,
+                            pickedDate.day,
+                            selectedDateTime.hour,
+                            selectedDateTime.minute,
+                          );
                         });
                       }
                     },
@@ -624,18 +826,28 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                       TextButton(
                         onPressed: () async {
                           final localContext = context;
-                          final picked = await showTimePicker(
+                          final pickedTime = await showTimePicker(
                             context: localContext,
-                            initialTime: selectedTime,
+                            initialTime: TimeOfDay.fromDateTime(
+                              selectedDateTime,
+                            ),
                           );
                           if (!mounted) return;
-                          if (picked != null) {
+                          if (pickedTime != null) {
                             setState(() {
-                              selectedTime = picked;
+                              selectedDateTime = DateTime(
+                                selectedDateTime.year,
+                                selectedDateTime.month,
+                                selectedDateTime.day,
+                                pickedTime.hour,
+                                pickedTime.minute,
+                              );
                             });
                           }
                         },
-                        child: Text(_formatTimeOfDay(selectedTime)),
+                        child: Text(
+                          '${selectedDateTime.hour.toString().padLeft(2, '0')}:${selectedDateTime.minute.toString().padLeft(2, '0')}',
+                        ),
                       ),
                     ],
                   ),
@@ -645,10 +857,14 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                       DropdownButton<Duration>(
                         value: selectedDuration,
                         items: durationOptions.map((duration) {
-                          final minutes = duration.inMinutes;
-                          final label = minutes >= 60
-                              ? '${minutes ~/ 60}小时${minutes % 60 == 0 ? '' : '${minutes % 60}分'}'
-                              : '$minutes分钟';
+                          String label;
+                          if (duration.inDays > 0) {
+                            label = '${duration.inDays}天';
+                          } else if (duration.inHours > 0) {
+                            label = '${duration.inHours}小时';
+                          } else {
+                            label = '${duration.inMinutes}分钟';
+                          }
                           return DropdownMenuItem(
                             value: duration,
                             child: Text(label),
@@ -680,13 +896,10 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                     if (controller.text.trim().isNotEmpty) {
                       Navigator.pop(
                         context,
-                        MapEntry(
-                          selectedDate,
-                          Event(
-                            title: controller.text.trim(),
-                            startTime: selectedTime,
-                            duration: selectedDuration,
-                          ),
+                        Event(
+                          title: controller.text.trim(),
+                          startDateTime: selectedDateTime,
+                          duration: selectedDuration,
                         ),
                       );
                     }
