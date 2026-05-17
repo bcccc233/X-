@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:lunar/lunar.dart';
 import 'package:table_calendar/table_calendar.dart';
 import '../services/event_storage_service.dart';
+import '../services/sync_service.dart';
 
 class Event {
   final String? id; // 数据库ID
@@ -72,25 +73,71 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
 
   // 数据存储服务
   late EventStorageService _storageService;
+  bool _storageReady = false;
 
   // 设置
   bool _isDarkTheme = false;
   bool _notificationsEnabled = true;
   CalendarFormat _defaultCalendarFormat = CalendarFormat.month;
+  // 同步控件
+  final TextEditingController _syncHostController = TextEditingController();
+  final TextEditingController _syncPortController = TextEditingController(
+    text: '4040',
+  );
+  final TextEditingController _syncTokenController = TextEditingController();
+  bool _isHosting = false;
+  bool _isConnected = false;
+  List<Map<String, dynamic>> _savedHosts = [];
 
   @override
   void initState() {
     super.initState();
     _initializeStorage();
+    // 注册连接状态回调用于 UI 更新
+    SyncService.instance.registerConnectionHandler((connected) {
+      if (!mounted) return;
+      setState(() {
+        _isConnected = connected;
+      });
+    });
+    _loadSavedHosts();
+  }
+
+  @override
+  void dispose() {
+    _syncHostController.dispose();
+    _syncPortController.dispose();
+    _syncTokenController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSavedHosts() async {
+    final hosts = await SyncService.instance.getSavedHosts();
+    if (!mounted) return;
+    setState(() {
+      _savedHosts = hosts;
+    });
   }
 
   // 初始化存储服务并加载数据
   Future<void> _initializeStorage() async {
     _storageService = EventStorageService();
-    await _storageService.init();
-
-    // 从数据库加载事件
-    _loadEventsFromStorage();
+    try {
+      await _storageService.init();
+      // 注册数据变更回调：远程同步后自动刷新UI
+      _storageService.onDataChanged = () {
+        if (!mounted) return;
+        _loadEventsFromStorage();
+      };
+      // 从数据库加载事件
+      _loadEventsFromStorage();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _storageReady = true;
+        });
+      }
+    }
   }
 
   // 从存储中加载事件
@@ -170,91 +217,95 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
   Widget build(BuildContext context) {
     Widget bodyContent;
 
-    switch (_currentIndex) {
-      case 0: // 日历
-        bodyContent = Column(
-          children: [
-            TableCalendar(
-              firstDay: DateTime.utc(2010, 1, 1),
-              lastDay: DateTime.utc(2035, 12, 31),
-              focusedDay: _focusedDay,
-              calendarFormat: _calendarFormat,
-              selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
-              onDaySelected: (selectedDay, focusedDay) {
-                setState(() {
-                  _selectedDay = selectedDay;
-                  _focusedDay = focusedDay;
-                });
-              },
-              onFormatChanged: (format) {
-                setState(() {
-                  _calendarFormat = format;
-                });
-              },
-              onPageChanged: (focusedDay) {
-                _focusedDay = focusedDay;
-              },
-              calendarBuilders: CalendarBuilders(
-                defaultBuilder: (context, day, focusedDay) {
-                  final lunarLabel = _getLunarDayLabel(day);
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(
-                          '${day.day}',
-                          style: const TextStyle(fontSize: 16),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          lunarLabel,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Colors.grey[500],
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
+    if (!_storageReady) {
+      bodyContent = const Center(child: CircularProgressIndicator());
+    } else {
+      switch (_currentIndex) {
+        case 0: // 日历
+          bodyContent = Column(
+            children: [
+              TableCalendar(
+                firstDay: DateTime.utc(2010, 1, 1),
+                lastDay: DateTime.utc(2035, 12, 31),
+                focusedDay: _focusedDay,
+                calendarFormat: _calendarFormat,
+                selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
+                onDaySelected: (selectedDay, focusedDay) {
+                  setState(() {
+                    _selectedDay = selectedDay;
+                    _focusedDay = focusedDay;
+                  });
                 },
-                markerBuilder: (context, date, events) {
-                  final hasEvents = _getEventsForDay(date).isNotEmpty;
-                  if (hasEvents) {
-                    return Positioned(
-                      bottom: 4,
-                      child: Container(
-                        width: 6,
-                        height: 6,
-                        decoration: const BoxDecoration(
-                          color: Colors.red,
-                          shape: BoxShape.circle,
-                        ),
+                onFormatChanged: (format) {
+                  setState(() {
+                    _calendarFormat = format;
+                  });
+                },
+                onPageChanged: (focusedDay) {
+                  _focusedDay = focusedDay;
+                },
+                calendarBuilders: CalendarBuilders(
+                  defaultBuilder: (context, day, focusedDay) {
+                    final lunarLabel = _getLunarDayLabel(day);
+                    return Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            '${day.day}',
+                            style: const TextStyle(fontSize: 16),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            lunarLabel,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey[500],
+                            ),
+                          ),
+                        ],
                       ),
                     );
-                  }
-                  return null;
-                },
+                  },
+                  markerBuilder: (context, date, events) {
+                    final hasEvents = _getEventsForDay(date).isNotEmpty;
+                    if (hasEvents) {
+                      return Positioned(
+                        bottom: 4,
+                        child: Container(
+                          width: 6,
+                          height: 6,
+                          decoration: const BoxDecoration(
+                            color: Colors.red,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      );
+                    }
+                    return null;
+                  },
+                ),
               ),
-            ),
-            Expanded(
-              child: _selectedDay == null
-                  ? const Center(child: Text('请选择一个日期'))
-                  : _buildEventList(_selectedDay!),
-            ),
-          ],
-        );
-        break;
+              Expanded(
+                child: _selectedDay == null
+                    ? const Center(child: Text('请选择一个日期'))
+                    : _buildEventList(_selectedDay!),
+              ),
+            ],
+          );
+          break;
 
-      case 1: // 日程列表
-        bodyContent = _buildAllEventsList();
-        break;
+        case 1: // 日程列表
+          bodyContent = _buildAllEventsList();
+          break;
 
-      case 2: // 设置
-        bodyContent = _buildSettingsPage();
-        break;
+        case 2: // 设置
+          bodyContent = _buildSettingsPage();
+          break;
 
-      default:
-        bodyContent = const Center(child: Text('未知页面'));
+        default:
+          bodyContent = const Center(child: Text('未知页面'));
+      }
     }
 
     return MaterialApp(
@@ -315,16 +366,16 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                             icon: const Icon(Icons.edit),
                             onPressed: () async {
                               if (!mounted) return;
-                              final dialogContext = context;
                               final newEvent = await _showEventDialog(
-                                dialogContext,
+                                context,
                                 initialEvent: event,
                               );
                               if (!mounted) return;
-                              final currentContext = context;
                               if (newEvent != null) {
+                                final BuildContext localContext = context;
                                 if (_hasConflict(newEvent, exclude: event)) {
-                                  _showConflictReminder(currentContext);
+                                  // ignore: use_build_context_synchronously
+                                  _showConflictReminder(localContext);
                                 } else {
                                   setState(() {
                                     final globalIndex = _events.indexOf(event);
@@ -371,17 +422,15 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
           child: ElevatedButton(
             onPressed: () async {
               if (!mounted) return;
-              final dialogContext = context;
               final newEvent = await _showEventDialog(
-                dialogContext,
+                context,
                 initialEvent: null,
                 day: day,
               );
               if (!mounted) return;
-              final currentContext = context;
               if (newEvent != null) {
                 if (_hasConflict(newEvent)) {
-                  _showConflictReminder(currentContext);
+                  _showConflictReminder(context);
                 } else {
                   // 保存到数据库并获取 ID
                   final eventId = await _storageService.addEvent(
@@ -421,13 +470,11 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
             label: const Text('添加日程'),
             onPressed: () async {
               if (!mounted) return;
-              final dialogContext = context;
-              final result = await _showAddEventWithDateDialog(dialogContext);
+              final result = await _showAddEventWithDateDialog(context);
               if (!mounted) return;
-              final currentContext = context;
               if (result != null) {
                 if (_hasConflict(result)) {
-                  _showConflictReminder(currentContext);
+                  _showConflictReminder(context);
                 } else {
                   // 保存到数据库并获取 ID
                   final eventId = await _storageService.addEvent(
@@ -485,19 +532,20 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
                                     icon: const Icon(Icons.edit),
                                     onPressed: () async {
                                       if (!mounted) return;
-                                      final dialogContext = context;
                                       final newEvent = await _showEventDialog(
-                                        dialogContext,
+                                        context,
                                         initialEvent: event,
                                       );
                                       if (!mounted) return;
-                                      final currentContext = context;
                                       if (newEvent != null) {
+                                        final BuildContext localContext =
+                                            context;
                                         if (_hasConflict(
                                           newEvent,
                                           exclude: event,
                                         )) {
-                                          _showConflictReminder(currentContext);
+                                          // ignore: use_build_context_synchronously
+                                          _showConflictReminder(localContext);
                                         } else {
                                           setState(() {
                                             final globalIndex = _events.indexOf(
@@ -554,6 +602,242 @@ class _CalendarHomePageState extends State<CalendarHomePage> {
   Widget _buildSettingsPage() {
     return ListView(
       children: [
+        Card(
+          margin: const EdgeInsets.all(8),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '局域网同步',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _syncHostController,
+                  decoration: const InputDecoration(labelText: '主机地址 (IP)'),
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _syncPortController,
+                        decoration: const InputDecoration(labelText: '端口'),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _syncTokenController,
+                        decoration: const InputDecoration(
+                          labelText: '配对 Token (可选)',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _isHosting
+                          ? null
+                          : () async {
+                              final port =
+                                  int.tryParse(_syncPortController.text) ??
+                                  4040;
+                              final token = _syncTokenController.text.isNotEmpty
+                                  ? _syncTokenController.text
+                                  : null;
+                              await SyncService.instance.startServer(
+                                port: port,
+                                token: token,
+                              );
+                              if (!mounted) return;
+                              setState(() {
+                                _isHosting = true;
+                              });
+                            },
+                      child: const Text('作为主机启动'),
+                    ),
+                    ElevatedButton(
+                      onPressed: !_isHosting
+                          ? null
+                          : () async {
+                              await SyncService.instance.stopServer();
+                              if (!mounted) return;
+                              setState(() {
+                                _isHosting = false;
+                              });
+                            },
+                      child: const Text('停止主机'),
+                    ),
+                    ElevatedButton(
+                      onPressed: _isConnected
+                          ? null
+                          : () async {
+                              final host = _syncHostController.text.trim();
+                              final port =
+                                  int.tryParse(_syncPortController.text) ??
+                                  4040;
+                              final token = _syncTokenController.text.isNotEmpty
+                                  ? _syncTokenController.text
+                                  : null;
+                              if (host.isEmpty) return;
+                              if (token != null) {
+                                await SyncService.instance.connectWithToken(
+                                  host,
+                                  port,
+                                  token,
+                                );
+                              } else {
+                                await SyncService.instance.connect(host, port);
+                              }
+                            },
+                      child: const Text('连接主机'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        final found = await SyncService.instance
+                            .discoverHosts();
+                        if (!mounted) return;
+                        if (found.isEmpty) {
+                          showDialog(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text('未发现主机'),
+                              content: const Text('在本局域网内未发现运行中的主机。'),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(ctx),
+                                  child: const Text('确定'),
+                                ),
+                              ],
+                            ),
+                          );
+                          return;
+                        }
+                        showDialog(
+                          context: context,
+                          builder: (ctx) {
+                            return AlertDialog(
+                              title: const Text('选择要连接的主机'),
+                              content: SizedBox(
+                                width: double.maxFinite,
+                                child: ListView.builder(
+                                  shrinkWrap: true,
+                                  itemCount: found.length,
+                                  itemBuilder: (context, index) {
+                                    final item = found[index];
+                                    final host = item['host'] ?? '';
+                                    final port = item['port']?.toString() ?? '';
+                                    final token = item['token'] ?? '';
+                                    return ListTile(
+                                      title: Text('$host:$port'),
+                                      subtitle: Text(
+                                        token != '' ? '需要 Token' : '无需 Token',
+                                      ),
+                                      onTap: () {
+                                        _syncHostController.text = host;
+                                        _syncPortController.text = port;
+                                        _syncTokenController.text = token ?? '';
+                                        Navigator.pop(ctx);
+                                      },
+                                    );
+                                  },
+                                ),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(ctx),
+                                  child: const Text('取消'),
+                                ),
+                              ],
+                            );
+                          },
+                        );
+                      },
+                      child: const Text('扫描局域网'),
+                    ),
+                    ElevatedButton(
+                      onPressed: !_isConnected
+                          ? null
+                          : () async {
+                              await SyncService.instance.disconnect();
+                            },
+                      child: const Text('断开连接'),
+                    ),
+                    ElevatedButton(
+                      onPressed: _savedHosts.isEmpty
+                          ? null
+                          : () async {
+                              // 填充第一个历史主机到输入框
+                              final item = _savedHosts.first;
+                              _syncHostController.text = item['host'] ?? '';
+                              _syncPortController.text =
+                                  '${item['port'] ?? ''}';
+                              _syncTokenController.text = item['token'] ?? '';
+                            },
+                      child: const Text('使用最近主机'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('状态：'),
+                    const SizedBox(width: 8),
+                    Text(
+                      _isHosting ? '主机(已启动)' : (_isConnected ? '已连接' : '未连接'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_savedHosts.isNotEmpty)
+          Card(
+            margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '最近主机',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  ..._savedHosts.map((h) {
+                    final host = h['host'] ?? '';
+                    final port = h['port']?.toString() ?? '';
+                    final token = h['token'] ?? '';
+                    return ListTile(
+                      title: Text('$host:$port'),
+                      subtitle: Text(token != '' ? '需要 Token' : '无需 Token'),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete),
+                        onPressed: () async {
+                          final idx = _savedHosts.indexOf(h);
+                          await SyncService.instance.removeSavedHostAt(idx);
+                          await _loadSavedHosts();
+                        },
+                      ),
+                      onTap: () {
+                        _syncHostController.text = host;
+                        _syncPortController.text = port;
+                        _syncTokenController.text = token ?? '';
+                      },
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ),
         SwitchListTile(
           title: const Text('深色主题'),
           value: _isDarkTheme,
